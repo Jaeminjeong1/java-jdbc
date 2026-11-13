@@ -7,6 +7,7 @@ import com.techcourse.domain.User;
 import com.techcourse.support.jdbc.init.DatabasePopulatorUtils;
 import com.interface21.dao.DataAccessException;
 import com.interface21.jdbc.core.JdbcTemplate;
+import com.interface21.transaction.support.TransactionSynchronizationManager;
 import org.h2.jdbcx.JdbcConnectionPool;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,7 +40,7 @@ class UserServiceTest {
     @Test
     void testChangePassword() {
         final var userHistoryDao = new UserHistoryDao(jdbcTemplate);
-        final var userService = new UserService(DataSourceConfig.getInstance(), userDao, userHistoryDao);
+        final var userService = new TxUserService(new AppUserService(userDao, userHistoryDao));
 
         final var newPassword = "qqqqq";
         final var createBy = "gugu";
@@ -54,7 +55,7 @@ class UserServiceTest {
     void testTransactionRollback() {
         // 트랜잭션 롤백 테스트를 위해 mock으로 교체
         final var userHistoryDao = new MockUserHistoryDao(jdbcTemplate);
-        final var userService = new UserService(DataSourceConfig.getInstance(), userDao, userHistoryDao);
+        final var userService = new TxUserService(new AppUserService(userDao, userHistoryDao));
 
         final var newPassword = "newPassword";
         final var createBy = "gugu";
@@ -65,20 +66,24 @@ class UserServiceTest {
         final var actual = userService.findById(1L);
 
         assertThat(actual.getPassword()).isNotEqualTo(newPassword);
+        assertThat(TransactionSynchronizationManager.getResource(DataSourceConfig.getInstance())).isNull();
     }
 
     @Test
     void testTransactionRollbackWhenCommitFails() {
-        final var userHistoryDao = new UserHistoryDao(jdbcTemplate);
-        final var userService = new UserService(dataSourceFailingOnCommit(), userDao, userHistoryDao);
+        final var failingDataSource = dataSourceFailingOnCommit();
+        final var failingTemplate = new JdbcTemplate(failingDataSource);
+        final var userService = new TxUserService(failingDataSource,
+                new AppUserService(new UserDao(failingTemplate), new UserHistoryDao(failingTemplate)));
         final var id = lastUserId();
-        final var passwordBefore = userService.findById(id).getPassword();
+        final var passwordBefore = userDao.findById(id).getPassword();
         final var historyCountBefore = countHistories();
 
         assertThrows(DataAccessException.class, () -> userService.changePassword(id, "newPassword", "gugu"));
 
-        assertThat(userService.findById(id).getPassword()).isEqualTo(passwordBefore);
+        assertThat(userDao.findById(id).getPassword()).isEqualTo(passwordBefore);
         assertThat(countHistories()).isEqualTo(historyCountBefore);
+        assertThat(TransactionSynchronizationManager.getResource(failingDataSource)).isNull();
     }
 
     @Test
@@ -88,12 +93,14 @@ class UserServiceTest {
         pool.setLoginTimeout(1);
         try {
             final var poolTemplate = new JdbcTemplate(pool);
-            final var userService = new UserService(pool, new UserDao(poolTemplate), new UserHistoryDao(poolTemplate));
+            final var userService = new TxUserService(pool,
+                    new AppUserService(new UserDao(poolTemplate), new UserHistoryDao(poolTemplate)));
             final var id = lastUserId();
 
             assertThatCode(() -> userService.changePassword(id, "qqqqq", "gugu")).doesNotThrowAnyException();
 
             assertThat(userService.findById(id).getPassword()).isEqualTo("qqqqq");
+            assertThat(pool.getActiveConnections()).isZero();
         } finally {
             pool.dispose();
         }
